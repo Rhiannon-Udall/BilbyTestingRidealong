@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-import copy
 import logging
+import os
 
-import argcomplete
 import bilby
 import configargparse as cfg
+import matplotlib.pyplot as plt
 import numpy as np
 
 logging.basicConfig(level=logging.INFO)
@@ -24,10 +24,10 @@ def read_prior_file(prior_file):
     Returns
     -----------
     prior_dict
-        A Bilby PriorDict object encoding the prior data from the .prior file
+        A dictionary encoding the prior data from the .prior file
     """
     # setup dict
-    prior_dict = bilby.core.prior.PriorDict()
+    prior_dict = {}
     # read file
     with open(prior_file, "r") as f:
         lines = f.readlines()
@@ -45,7 +45,6 @@ def read_prior_file(prior_file):
             except SyntaxError:
                 logger.info(f"Could not add line {line} to the PriorDict")
                 logger.exception("The exception was")
-
     return prior_dict
 
 
@@ -85,18 +84,19 @@ def read_injection_file(injection_file):
     return injection_dict
 
 
-def parser():
+def parse():
     """
     Parser config and input args to generate test parameters
 
     Returns
     ------------
     arguments
-        A cfgargparse object
+        A configargparse object
     """
     parser = cfg.ArgumentParser(
         config_file_parser_class=cfg.ConfigparserConfigFileParser
     )
+    parser.add_argument("config", is_config_file=True, help="The config file to read")
     parser_data = parser.add_argument_group(
         title="Data Arguments",
         description="Arguments for the creation and description of the data",
@@ -121,8 +121,7 @@ def parser():
     )
     parser_data.add_argument(
         "--noise-kwargs",
-        type=dict,
-        default={},
+        default="{}",
         help="Kwargs for noise function, not including srate and duration",
     )
     parser_sampler = parser.add_argument_group(
@@ -137,8 +136,7 @@ def parser():
     )
     parser_sampler.add_argument(
         "--sampler-kwargs",
-        type=dict,
-        default={"nlive": 1000},
+        default="{'nlive': 1000}",
         help="Kwargs to pass to the sampler",
     )
     parser_prior = parser.add_argument_group(
@@ -146,14 +144,13 @@ def parser():
         description="Arguments to pass to the prior - preferably just the .prior file",
     )
     parser_prior.add_argument(
-        "--prior-dict",
+        "--prior-file",
         type=str,
         help="The path to the .prior file from which the prior dict is assembled",
     )
     parser_prior.add_argument(
         "--prior-extra-dict",
-        type=dict,
-        default={},
+        default="{}",
         help="Overrides for parameter:prior - preferentially update the .prior file",
     )
     parser_job = parser.add_argument_group(
@@ -189,8 +186,7 @@ def parser():
     )
     parser_injection.add_argument(
         "--injection-parameters-extra",
-        type=dict,
-        default={},
+        default="{}",
         help="The parameters to injection, for the given model, overrides injection file settings",
     )
     parser_likelihood = parser.add_argument_group(
@@ -257,7 +253,7 @@ def sine_model(t, omega, phi, amplitude):
     return amplitude * np.sin(omega * t + phi)
 
 
-def gaussian_noise(noise_std, duration, srate):
+def gaussian_noise(duration, srate, sigma):
     """
     Produces Gaussian noise (flat PSD) over time
 
@@ -275,7 +271,7 @@ def gaussian_noise(noise_std, duration, srate):
     data
         The noise realization over the time range
     """
-    return np.random.normal(0, noise_std, duration * srate)
+    return np.random.normal(0, sigma, duration * srate)
 
 
 def zero_noise(duration, srate):
@@ -306,3 +302,124 @@ _model_map = dict(
     linear=linear_model,
     sine=sine_model,
 )
+
+
+def make_injection_dict(arguments):
+    """
+    Helper for both reading injection file and updating with command line args
+
+    Parameters
+    ---------------
+    arguments
+        The output of parse()
+
+    Returns
+    --------------
+    injection_args
+        Arguments to pass to the injection model
+    """
+    injection_args = read_injection_file(arguments.injection_file)
+    injection_args.update(eval(arguments.injection_parameters_extra))
+    return injection_args
+
+
+def initialize(arguments):
+    """
+    Setup the run directory, write data to a data file, and plot the data
+
+    Parameters
+    -------------
+    arguments
+        The output of parse()
+    """
+
+    if not os.path.isdir(arguments.outdir):
+        os.mkdir(arguments.outdir)
+
+    injection_args = make_injection_dict(arguments)
+
+    time = np.arange(0, arguments.duration, 1 / arguments.srate)
+    noise = _noise_map[arguments.noise_type](
+        arguments.duration, arguments.srate, **eval(arguments.noise_kwargs)
+    )
+
+    signal = _model_map[arguments.injection_model](time, **injection_args)
+    data = signal + noise
+
+    fig, ax = plt.subplots()
+    ax.plot(time, data, "o", label="data")
+    ax.plot(
+        time,
+        signal,
+        "--r",
+        label="signal",
+    )
+    ax.set_xlabel("time")
+    ax.set_ylabel("y")
+    ax.legend()
+    fig.savefig(f"{arguments.outdir}/{arguments.label}_data.png")
+
+    np.save(f"{arguments.outdir}/{arguments.label}_data.pkl", data)
+
+    return time, data
+
+
+def run_sampler():
+    """
+    Runs the sampler for the data
+
+    Inputs
+    -------------------
+    """
+    arguments = parse()
+
+    if not os.path.exists(f"{arguments.outdir}/{arguments.label}_data.pkl"):
+        time, data = initialize(arguments)
+    else:
+        data = np.load(f"{arguments.outdir}/{arguments.label}_data.pkl")
+        time = np.arange(0, arguments.duration, 1 / arguments.srate)
+
+    injection_args = make_injection_dict(arguments)
+    prior_dict = read_prior_file(arguments.prior_file)
+    arguments.noise_kwargs = eval(arguments.noise_kwargs)
+    arguments.prior_extra_dict = eval(arguments.prior_extra_dict)
+    for key, val in arguments.prior_extra_dict.items():
+        prior_dict[key] = eval(val)
+    if arguments.noise_type == "gaussian" and arguments.estimate_sigma:
+        prior_dict["sigma"] = bilby.core.prior.Uniform(
+            0,
+            2 * np.abs(arguments.noise_kwargs["sigma"]),
+        )
+    priors = bilby.core.prior.PriorDict(prior_dict)
+    if arguments.noise_type == "gaussian" and arguments.estimate_sigma:
+        likelihood = bilby.likelihood.GaussianLikelihood(
+            time, data, _model_map[arguments.injection_model]
+        )
+    elif arguments.noise_type == "gaussian":
+        likelihood = bilby.likelihood.GaussianLikelihood(
+            time,
+            data,
+            _model_map[arguments.likelihood_model],
+            sigma=arguments.noise_kwargs["sigma"],
+        )
+    elif arguments.noise_type == "zero":
+        likelihood = bilby.likelihood.GaussianLikelihood(
+            time,
+            data,
+            _model_map[arguments.likelihood_model],
+            sigma=0,
+        )
+    else:
+        logger.error("Cannot use Gaussian Likelihood with non-gaussian noise!")
+        raise ValueError
+    arguments.sampler_kwargs = eval(arguments.sampler_kwargs)
+    result = bilby.run_sampler(
+        likelihood=likelihood,
+        priors=priors,
+        sampler=arguments.sampler,
+        injection_parameters=injection_args,
+        outdir=arguments.outdir,
+        label=arguments.label,
+        **arguments.sampler_kwargs,
+    )
+    result.plot_corner()
