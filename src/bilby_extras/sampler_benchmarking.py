@@ -253,6 +253,33 @@ def sine_model(t, omega, phi, amplitude):
     return amplitude * np.sin(omega * t + phi)
 
 
+def damped_sinusoid(t, omega, phi, amplitude_initial, damping_time):
+    """
+    Sinusoidal model over the time range
+
+    Parameters
+    -----------
+    t
+        The time array to evaluate over
+    omega
+        The angular frequency of the oscillation
+    phi
+        The phase of the oscillation
+    amplitude_initial
+        The amplitude at the beginning of the oscillation
+    damping_time
+        The exponential damping time of the sinusoid (1 / the complex part of the angular frequency)
+
+    Returns
+    ----------
+    data
+        The data for the damped sinusoid over time
+    """
+    sinusoid = amplitude_initial * np.sin(omega * t + phi)
+    damping_envelope = np.exp(-t / damping_time)
+    return sinusoid * damping_envelope
+
+
 def gaussian_noise(duration, srate, sigma):
     """
     Produces Gaussian noise (flat PSD) over time
@@ -301,6 +328,7 @@ _noise_map = dict(
 _model_map = dict(
     linear=linear_model,
     sine=sine_model,
+    damped_sine=damped_sinusoid,
 )
 
 
@@ -332,20 +360,22 @@ def initialize(arguments):
     arguments
         The output of parse()
     """
-
+    # prepare run directory if necessary
     if not os.path.isdir(arguments.outdir):
         os.mkdir(arguments.outdir)
 
+    # get injection arguments
     injection_args = make_injection_dict(arguments)
 
+    # make time, noise, signal arrays - combine for data
     time = np.arange(0, arguments.duration, 1 / arguments.srate)
     noise = _noise_map[arguments.noise_type](
         arguments.duration, arguments.srate, **eval(arguments.noise_kwargs)
     )
-
     signal = _model_map[arguments.injection_model](time, **injection_args)
     data = signal + noise
 
+    # plot the data
     fig, ax = plt.subplots()
     ax.plot(time, data, "o", label="data")
     ax.plot(
@@ -359,6 +389,7 @@ def initialize(arguments):
     ax.legend()
     fig.savefig(f"{arguments.outdir}/{arguments.label}_data.png")
 
+    # save the data
     np.save(f"{arguments.outdir}/{arguments.label}_data.pkl", data)
 
     return time, data
@@ -371,29 +402,41 @@ def run_sampler():
     Inputs
     -------------------
     """
+    # get arguments
     arguments = parse()
 
-    if not os.path.exists(f"{arguments.outdir}/{arguments.label}_data.pkl"):
-        time, data = initialize(arguments)
-    else:
+    # if the run already exists load it, else make it
+    if os.path.exists(f"{arguments.outdir}/{arguments.label}_data.pkl"):
         data = np.load(f"{arguments.outdir}/{arguments.label}_data.pkl")
         time = np.arange(0, arguments.duration, 1 / arguments.srate)
+    else:
+        time, data = initialize(arguments)
 
+    # get injection arguments, make and update the prior dict according to config
     injection_args = make_injection_dict(arguments)
     prior_dict = read_prior_file(arguments.prior_file)
-    arguments.noise_kwargs = eval(arguments.noise_kwargs)
     arguments.prior_extra_dict = eval(arguments.prior_extra_dict)
     for key, val in arguments.prior_extra_dict.items():
         prior_dict[key] = eval(val)
+
+    # determine if we will be doing estimate_sigma, and set the prior on sigma accordingly
+    arguments.noise_kwargs = eval(arguments.noise_kwargs)
     if arguments.noise_type == "gaussian" and arguments.estimate_sigma:
         prior_dict["sigma"] = bilby.core.prior.Uniform(
             0,
             2 * np.abs(arguments.noise_kwargs["sigma"]),
         )
+    # convert to PriorDict
     priors = bilby.core.prior.PriorDict(prior_dict)
+
+    # choose likelihood method and arguments based on noise type and settings
     if arguments.noise_type == "gaussian" and arguments.estimate_sigma:
         likelihood = bilby.likelihood.GaussianLikelihood(
-            time, data, _model_map[arguments.injection_model]
+            time,
+            data,
+            _model_map[
+                arguments.injection_model,
+            ],
         )
     elif arguments.noise_type == "gaussian":
         likelihood = bilby.likelihood.GaussianLikelihood(
@@ -412,7 +455,11 @@ def run_sampler():
     else:
         logger.error("Cannot use Gaussian Likelihood with non-gaussian noise!")
         raise ValueError
+
+    # get the sampler kwargs
     arguments.sampler_kwargs = eval(arguments.sampler_kwargs)
+
+    # run the sampler, plot the final results
     result = bilby.run_sampler(
         likelihood=likelihood,
         priors=priors,
