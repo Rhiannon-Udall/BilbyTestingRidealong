@@ -84,6 +84,34 @@ def read_injection_file(injection_file):
     return injection_dict
 
 
+def add_model(source, shorthand_name, function_name):
+    """
+    A method for adding a new model for data generation, from a .py file
+
+    Parameters
+    --------------
+    source
+        The path to the .py file where the function may be found
+    shorthand_name
+        The name to use in calling the model (should be the same as the name in the .cfg)
+    function_name
+        The name of the function to map in
+
+    Modifies
+    ---------------
+    _model_map
+        Adds the function with key shorthand_name
+    """
+    # import the module from the path
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("import_module", source)
+    function_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(function_module)
+    # add the specific function to the model map
+    _model_map[shorthand_name] = getattr(function_module, function_name)
+
+
 def parse():
     """
     Parser config and input args to generate test parameters
@@ -96,7 +124,11 @@ def parse():
     parser = cfg.ArgumentParser(
         config_file_parser_class=cfg.ConfigparserConfigFileParser
     )
-    parser.add_argument("config", is_config_file=True, help="The config file to read")
+    parser.add_argument(
+        "config",
+        is_config_file=True,
+        help="The config file to read",
+    )
     parser_data = parser.add_argument_group(
         title="Data Arguments",
         description="Arguments for the creation and description of the data",
@@ -189,6 +221,16 @@ def parse():
         default="{}",
         help="The parameters to injection, for the given model, overrides injection file settings",
     )
+    parser_injection.add_argument(
+        "--injection-fixed-kwargs",
+        default="{}",
+        help="Fixed kwargs which should not be sampled over, to pass as **kwargs to the model",
+    )
+    parser_injection.add_argument(
+        "--add-custom-model",
+        default="()",
+        help="A tuple of (path_to_source_for_import, shorthand_name, function_name)",
+    )
     parser_likelihood = parser.add_argument_group(
         title="Likelihood Arguments",
         description="Arguments to use when evaluating the likelihood for the model",
@@ -204,6 +246,11 @@ def parse():
         type=str,
         default="linear",
         help=f"the data model to compute likelihoods with, options are {_model_map.keys()}",
+    )
+    parser_likelihood.add_argument(
+        "--likelihood-fixed-kwargs",
+        default="{}",
+        help="Fixed kwargs which should not be sampled over, to pass as **kwargs to the model",
     )
     arguments = parser.parse_args()
     return arguments
@@ -351,6 +398,38 @@ def make_injection_dict(arguments):
     return injection_args
 
 
+def sanitize_input_prior(model_function, prior_dict):
+    """
+    When a function has many complex parameters and some are optional, set the unused ones to 0
+
+    Parameters
+    ---------------
+    arguments
+        The function used for the likelihood - should be from _model_map
+    prior_dict
+        The prior dict to update - should already have all .prior and cmd line args added
+
+    Returns
+    -------------
+    prior_dict
+        The prior_dict with all necessary extra parameters fixed
+    """
+
+    import inspect
+
+    # get the non-time named kwargs
+    model_kwargs = [x for x in inspect.getargspec(model_function)[0] if x != "t"]
+    # get their defaults
+    model_kwarg_defaults = inspect.getargspec(model_function)[-1]
+    # for named kwargs, if they aren't already in the prior, add them as a delta function at their default value
+    for i, key in enumerate(model_kwargs):
+        if key not in prior_dict.keys():
+            prior_dict[key] = bilby.core.prior.DeltaFunction(
+                model_kwarg_defaults[i], name=key
+            )
+    return prior_dict
+
+
 def initialize(arguments):
     """
     Setup the run directory, write data to a data file, and plot the data
@@ -366,6 +445,9 @@ def initialize(arguments):
 
     # get injection arguments
     injection_args = make_injection_dict(arguments)
+
+    arguments.injection_fixed_kwargs = eval(arguments.injection_fixed_kwargs)
+    injection_args.update(arguments.injection_fixed_kwargs)
 
     # make time, noise, signal arrays - combine for data
     time = np.arange(0, arguments.duration, 1 / arguments.srate)
@@ -390,7 +472,7 @@ def initialize(arguments):
     fig.savefig(f"{arguments.outdir}/{arguments.label}_data.png")
 
     # save the data
-    np.save(f"{arguments.outdir}/{arguments.label}_data.pkl", data)
+    np.save(f"{arguments.outdir}/{arguments.label}_data", data)
 
     return time, data
 
@@ -405,9 +487,18 @@ def run_sampler():
     # get arguments
     arguments = parse()
 
+    # add a custom model if necessary
+    arguments.add_custom_model = eval(arguments.add_custom_model)
+    if arguments.add_custom_model != ():
+        add_model(
+            arguments.add_custom_model[0],
+            arguments.add_custom_model[1],
+            arguments.add_custom_model[2],
+        )
+
     # if the run already exists load it, else make it
-    if os.path.exists(f"{arguments.outdir}/{arguments.label}_data.pkl"):
-        data = np.load(f"{arguments.outdir}/{arguments.label}_data.pkl")
+    if os.path.exists(f"{arguments.outdir}/{arguments.label}_data.npy"):
+        data = np.load(f"{arguments.outdir}/{arguments.label}_data.npy")
         time = np.arange(0, arguments.duration, 1 / arguments.srate)
     else:
         time, data = initialize(arguments)
@@ -426,17 +517,21 @@ def run_sampler():
             0,
             2 * np.abs(arguments.noise_kwargs["sigma"]),
         )
+
+    prior_dict = sanitize_input_prior(
+        _model_map[arguments.likelihood_model], prior_dict
+    )
+
     # convert to PriorDict
     priors = bilby.core.prior.PriorDict(prior_dict)
-
     # choose likelihood method and arguments based on noise type and settings
+    arguments.likelihood_fixed_kwargs = eval(arguments.likelihood_fixed_kwargs)
     if arguments.noise_type == "gaussian" and arguments.estimate_sigma:
         likelihood = bilby.likelihood.GaussianLikelihood(
             time,
             data,
-            _model_map[
-                arguments.injection_model,
-            ],
+            _model_map[arguments.likelihood_model],
+            **arguments.likelihood_fixed_kwargs,
         )
     elif arguments.noise_type == "gaussian":
         likelihood = bilby.likelihood.GaussianLikelihood(
@@ -444,6 +539,7 @@ def run_sampler():
             data,
             _model_map[arguments.likelihood_model],
             sigma=arguments.noise_kwargs["sigma"],
+            **arguments.likelihood_fixed_kwargs,
         )
     elif arguments.noise_type == "zero":
         likelihood = bilby.likelihood.GaussianLikelihood(
@@ -451,6 +547,7 @@ def run_sampler():
             data,
             _model_map[arguments.likelihood_model],
             sigma=0,
+            **arguments.likelihood_fixed_kwargs,
         )
     else:
         logger.error("Cannot use Gaussian Likelihood with non-gaussian noise!")
