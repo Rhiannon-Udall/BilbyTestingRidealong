@@ -112,6 +112,201 @@ def add_model(source, shorthand_name, function_name):
     _model_map[shorthand_name] = getattr(function_module, function_name)
 
 
+def linear_model(t, m, b):
+    """
+    Linear data for the time range
+
+    Parameters
+    -------------
+    t
+        The time array to evaluate over
+    m
+        The line's slope
+    b
+        The line's y intercept
+
+    Returns
+    --------------
+    data
+        The line over time
+    """
+    return m * t + b
+
+
+def sine_model(t, omega, phi, amplitude):
+    """
+    Sinusoidal model over the time range
+
+    Parameters
+    -----------
+    t
+        The time array to evaluate over
+    omega
+        The angular frequency of the oscillation
+    phi
+        The phase of the oscillation
+    amplitude
+        The amplitude of the oscillation
+
+    Returns
+    ----------
+    data
+        The data for the sinusoid over time
+    """
+    return amplitude * np.sin(omega * t + phi)
+
+
+def damped_sinusoid(t, omega, phi, amplitude_initial, damping_time):
+    """
+    Sinusoidal model over the time range
+
+    Parameters
+    -----------
+    t
+        The time array to evaluate over
+    omega
+        The angular frequency of the oscillation
+    phi
+        The phase of the oscillation
+    amplitude_initial
+        The amplitude at the beginning of the oscillation
+    damping_time
+        The exponential damping time of the sinusoid (1 / the complex part of the angular frequency)
+
+    Returns
+    ----------
+    data
+        The data for the damped sinusoid over time
+    """
+    sinusoid = amplitude_initial * np.sin(omega * t + phi)
+    damping_envelope = np.exp(-t / damping_time)
+    return sinusoid * damping_envelope
+
+
+def gaussian_noise(duration, srate, sigma):
+    """
+    Produces Gaussian noise (flat PSD) over time
+
+    Parameters
+    ------------
+    noise_std
+        The standard deviation of the Gaussian generating the noise
+    duration
+        The duration of the signal
+    srate
+        The sampling rate for the signal
+
+    Returns
+    ------------
+    data
+        The noise realization over the time range
+    """
+    return np.random.normal(0, sigma, duration * srate)
+
+
+def zero_noise(duration, srate):
+    """
+    Produces an empty array for the data over time, reflecting a zero noise case
+
+    Parameters
+    -------------
+    duration
+        The duration of the signal
+    srate
+        The sampling rate for the signal
+
+    Returns
+    --------------
+    data
+        An empty array of the correct length
+    """
+    return np.zeros(duration * srate)
+
+
+_noise_map = dict(
+    gaussian=gaussian_noise,
+    zero=zero_noise,
+)
+
+_model_map = dict(
+    linear=linear_model,
+    sine=sine_model,
+    damped_sine=damped_sinusoid,
+)
+
+
+def make_injection_dict(arguments):
+    """
+    Helper for both reading injection file and updating with command line args
+
+    Parameters
+    ---------------
+    arguments
+        The output of parse()
+
+    Returns
+    --------------
+    injection_args
+        Arguments to pass to the injection model
+    """
+    injection_args = read_injection_file(arguments.injection_file)
+    injection_args.update(eval(arguments.injection_parameters_extra))
+    return injection_args
+
+
+def make_prior_dict(arguments):
+    """
+    Helper for both reading prior file and updating with command line args
+
+    Parameters
+    ---------------
+    arguments
+        The output of parse()
+
+    Returns
+    --------------
+    prior_dict
+        Dict of prior keys and generators
+    """
+    prior_dict = read_prior_file(arguments.prior_file)
+    arguments.prior_extra_dict = eval(arguments.prior_extra_dict)
+    for key, val in arguments.prior_extra_dict.items():
+        prior_dict[key] = eval(val)
+    return prior_dict
+
+
+def sanitize_input_prior(model_function, prior_dict):
+    """
+    When a function has many complex parameters and some are optional, set the unused ones to 0
+
+    Parameters
+    ---------------
+    arguments
+        The function used for the likelihood - should be from _model_map
+    prior_dict
+        The prior dict to update - should already have all .prior and cmd line args added
+
+    Returns
+    -------------
+    prior_dict
+        The prior_dict with all necessary extra parameters fixed
+    """
+
+    import inspect
+
+    # get the non-time named kwargs
+    model_kwargs = [x for x in inspect.getargspec(model_function)[0] if x != "t"]
+    # get their defaults
+    model_kwarg_defaults = inspect.getargspec(model_function)[-1]
+    # for named kwargs, if they aren't already in the prior, add them as a delta function at their default value
+    for i, key in enumerate(model_kwargs):
+        if key not in prior_dict.keys():
+            prior_dict[key] = bilby.core.prior.DeltaFunction(
+                model_kwarg_defaults[i], name=key
+            )
+    return prior_dict
+
+
 def parse():
     """
     Parser config and input args to generate test parameters
@@ -256,180 +451,6 @@ def parse():
     return arguments
 
 
-def linear_model(t, m, b):
-    """
-    Linear data for the time range
-
-    Parameters
-    -------------
-    t
-        The time array to evaluate over
-    m
-        The line's slope
-    b
-        The line's y intercept
-
-    Returns
-    --------------
-    data
-        The line over time
-    """
-    return m * t + b
-
-
-def sine_model(t, omega, phi, amplitude):
-    """
-    Sinusoidal model over the time range
-
-    Parameters
-    -----------
-    t
-        The time array to evaluate over
-    omega
-        The angular frequency of the oscillation
-    phi
-        The phase of the oscillation
-    amplitude
-        The amplitude of the oscillation
-
-    Returns
-    ----------
-    data
-        The data for the sinusoid over time
-    """
-    return amplitude * np.sin(omega * t + phi)
-
-
-def damped_sinusoid(t, omega, phi, amplitude_initial, damping_time):
-    """
-    Sinusoidal model over the time range
-
-    Parameters
-    -----------
-    t
-        The time array to evaluate over
-    omega
-        The angular frequency of the oscillation
-    phi
-        The phase of the oscillation
-    amplitude_initial
-        The amplitude at the beginning of the oscillation
-    damping_time
-        The exponential damping time of the sinusoid (1 / the complex part of the angular frequency)
-
-    Returns
-    ----------
-    data
-        The data for the damped sinusoid over time
-    """
-    sinusoid = amplitude_initial * np.sin(omega * t + phi)
-    damping_envelope = np.exp(-t / damping_time)
-    return sinusoid * damping_envelope
-
-
-def gaussian_noise(duration, srate, sigma):
-    """
-    Produces Gaussian noise (flat PSD) over time
-
-    Parameters
-    ------------
-    noise_std
-        The standard deviation of the Gaussian generating the noise
-    duration
-        The duration of the signal
-    srate
-        The sampling rate for the signal
-
-    Returns
-    ------------
-    data
-        The noise realization over the time range
-    """
-    return np.random.normal(0, sigma, duration * srate)
-
-
-def zero_noise(duration, srate):
-    """
-    Produces an empty array for the data over time, reflecting a zero noise case
-
-    Parameters
-    -------------
-    duration
-        The duration of the signal
-    srate
-        The sampling rate for the signal
-
-    Returns
-    --------------
-    data
-        An empty array of the correct length
-    """
-    return np.zeros(duration * srate)
-
-
-_noise_map = dict(
-    gaussian=gaussian_noise,
-    zero=zero_noise,
-)
-
-_model_map = dict(
-    linear=linear_model,
-    sine=sine_model,
-    damped_sine=damped_sinusoid,
-)
-
-
-def make_injection_dict(arguments):
-    """
-    Helper for both reading injection file and updating with command line args
-
-    Parameters
-    ---------------
-    arguments
-        The output of parse()
-
-    Returns
-    --------------
-    injection_args
-        Arguments to pass to the injection model
-    """
-    injection_args = read_injection_file(arguments.injection_file)
-    injection_args.update(eval(arguments.injection_parameters_extra))
-    return injection_args
-
-
-def sanitize_input_prior(model_function, prior_dict):
-    """
-    When a function has many complex parameters and some are optional, set the unused ones to 0
-
-    Parameters
-    ---------------
-    arguments
-        The function used for the likelihood - should be from _model_map
-    prior_dict
-        The prior dict to update - should already have all .prior and cmd line args added
-
-    Returns
-    -------------
-    prior_dict
-        The prior_dict with all necessary extra parameters fixed
-    """
-
-    import inspect
-
-    # get the non-time named kwargs
-    model_kwargs = [x for x in inspect.getargspec(model_function)[0] if x != "t"]
-    # get their defaults
-    model_kwarg_defaults = inspect.getargspec(model_function)[-1]
-    # for named kwargs, if they aren't already in the prior, add them as a delta function at their default value
-    for i, key in enumerate(model_kwargs):
-        if key not in prior_dict.keys():
-            prior_dict[key] = bilby.core.prior.DeltaFunction(
-                model_kwarg_defaults[i], name=key
-            )
-    return prior_dict
-
-
 def initialize(arguments):
     """
     Setup the run directory, write data to a data file, and plot the data
@@ -505,10 +526,7 @@ def run_sampler():
 
     # get injection arguments, make and update the prior dict according to config
     injection_args = make_injection_dict(arguments)
-    prior_dict = read_prior_file(arguments.prior_file)
-    arguments.prior_extra_dict = eval(arguments.prior_extra_dict)
-    for key, val in arguments.prior_extra_dict.items():
-        prior_dict[key] = eval(val)
+    prior_dict = make_prior_dict(arguments)
 
     # determine if we will be doing estimate_sigma, and set the prior on sigma accordingly
     arguments.noise_kwargs = eval(arguments.noise_kwargs)
