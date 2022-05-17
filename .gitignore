@@ -2,7 +2,7 @@
 build/
 dist/
 docs/_*
-BilbyRidealong.egg-info/
+src/BilbyRidealong.egg-info/
 MANIFEST
 *.pyc
 *.png
