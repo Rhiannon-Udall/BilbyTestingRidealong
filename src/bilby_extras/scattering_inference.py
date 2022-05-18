@@ -136,12 +136,6 @@ class SampleScattering(object):
             help="The length of the segment in integer seconds",
         )
         parser_data.add_argument(
-            "--number-harmonics",
-            type=int,
-            default=1,
-            help="The number of arches to search for",
-        )
-        parser_data.add_argument(
             "--psd-file",
             type=str,
             help="The psd file to read in",
@@ -155,12 +149,11 @@ class SampleScattering(object):
         parser_data.add_argument(
             "--ifo-name",
             type=str,
-            default=None,
             help="The IFO to study - if not passed, will attempt to infer from channel",
         )
         parser_data.add_argument(
             "--zero-noise",
-            type=bool,
+            default="False",
             help="If True, generate with zero noise",
         )
         parser_data.add_argument(
@@ -357,10 +350,7 @@ class SampleScattering(object):
                 self.add_custom_model[1],
                 self.add_custom_model[2],
             )
-
-        # make injection and prior dicts
-
-        self.injection_args = self.make_injection_dict(self.original_arguments)
+        # make prior dict
         self.prior_dict = self.make_prior_dict(self.original_arguments)
         self.prior_dict = self.sanitize_input_prior(
             self._model_map[self.likelihood_model],
@@ -422,6 +412,11 @@ class SampleScattering(object):
     def initialize(self):
         """
         Create the ifo object - either read frame or generate noise and inject
+
+        Returns
+        ---------
+        self.ifo
+            The Interferometer object containing the data
         """
         if self.channel == "fake":
             # The case that this is an injection run
@@ -429,6 +424,19 @@ class SampleScattering(object):
             self.power_spectral_density = (
                 PowerSpectralDensity.from_power_spectral_density_file(self.psd_file)
             )
+
+            # make the injection args, since they are now necessary
+            self.injection_args = self.make_injection_dict(self.original_arguments)
+
+            # Setup and update injection waveform kwargs
+            default_injection_fixed_kwargs = dict(
+                ifo_name="L1",
+                number_harmonics=1,
+            )
+            default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+            default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
+            self.injection_fixed_kwargs = default_injection_fixed_kwargs
+
             # Get a WF generator for the injection
             self.injection_waveform_generator = self.setup_waveform_generator(
                 self.injection_model,
@@ -481,7 +489,7 @@ class SampleScattering(object):
         )
         # Make a timeseries for plotting
         self.tseries_gwpy = self.ifo.strain_data.to_gwpy_timeseries()
-        return
+        return self.ifo
 
     def plot_tseries_data(self):
         """
@@ -554,6 +562,12 @@ class SampleScattering(object):
 
     def setup_likelihood(self):
         # define likelihood function
+        default_likelihood_fixed_kwargs = dict(
+            ifo_name="L1",
+            number_harmonics=1,
+        )
+        default_likelihood_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+        default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_waveform_generator = self.setup_waveform_generator(
             self.likelihood_model,
             self.likelihood_fixed_kwargs,
@@ -565,26 +579,41 @@ class SampleScattering(object):
         )
 
     def sample(self):
-        # run the sampler
+        """
+        Runs the sampler for this data and likelihood
+
+        Returns
+        ---------
+        self.result
+            The completed result object
+        """
         if "injection_args" not in self.__dict__.keys():
             self.injection_args = None
 
+        default_sampler_kwargs = dict(
+            sample="rwalk",
+            npoints=1000,
+            dlogz=0.1,
+            proposals=["diff", "walk", "snooker"],
+        )
+        default_sampler_kwargs.update(self.sampler_kwargs)
+        self.sampler_kwargs = default_sampler_kwargs
         self.result = run_sampler(
             self.likelihood,
             self.prior_dict,
-            sampler="dynesty",
+            sampler=self.sampler,
             outdir=self.outdir,
             label=self.label,
             resume=True,
-            sample="rwalk",
-            npoints=10000,
-            dlogz=0.1,
             injection_parameters=self.injection_parameters,
-            proposals=["volumetric", "normal", "chi", "diff", "snooker"],
+            **self.sampler_kwargs,
         )
+        return self.result
 
     def produce_corner(self):
-        # produce a corner when done
+        """
+        Produces the cornerplot for a completed result
+        """
         self.result.plot_corner()
 
 
@@ -594,99 +623,93 @@ _model_map = dict(
 )
 
 
-def main():
-    # parse args
-    opts_dict = SampleScattering.parse_args_and_config()
-    # the case for making a condor submission / stable directory
-    if opts_dict["generate_mode"]:
-        # make sure we aren't also trying to sample
-        assert not opts_dict["sampling_mode"]
+def setup_job():
+    arguments = SampleScattering.parse_args_and_config()
 
-        # imports
-        import configparser
+    # imports
+    import configparser
 
-        from glue import pipeline
+    from glue import pipeline
 
-        # if local directory make global path, if global use global
-        if "/" in opts_dict["outdir"]:
-            rundir = opts_dict["outdir"]
-        else:
-            rundir = os.path.join(os.getcwd(), opts_dict["outdir"])
-
-        # remove helper args, which we don't want written into local config
-        opts_dict.pop("prior_dict")
-        if "injection_parameters" in opts_dict.keys():
-            opts_dict.pop("injection_parameters")
-        opts_dict.pop("ini")
-        opts_dict.pop("generate_mode")
-        opts_dict.pop("sampling_mode")
-        opts_dict.pop("model_function")
-
-        ligo_accounting_group = opts_dict.pop("ligo_accounting")
-        ligo_accounting_user = opts_dict.pop("ligo_user_name")
-
-        # make sure the run doesn't already exist, and make the directory
-        assert not os.path.isdir(rundir)
-        os.mkdir(rundir)
-
-        # make a dict amenable to writing into the local config, and do the writing
-        config_in_rundir = os.path.join(rundir, opts_dict["label"] + ".ini")
-        write_dict = {}
-        for key, value in opts_dict.items():
-            write_dict[key.replace("_", "-")] = str(write_dict.pop(key))
-            parser = configparser.ConfigParser()
-            parser["Arguments"] = write_dict
-        with open(config_in_rundir, "w") as f:
-            parser.write(f)
-
-        # setup the submit file
-        scattering_dag = pipeline.CondorDAG(
-            log=os.path.join(rundir, "dag_scattering_PE.log")
-        )
-        scattering_dag.set_dag_file(os.path.join(rundir, "dag_scattering_PE"))
-
-        sampler_exe = __file__
-        sampler_job = pipeline.CondorDAGJob(universe="vanilla", executable=sampler_exe)
-        sampler_job.set_log_file(os.path.join(rundir, "sampler.log"))
-        sampler_job.set_stdout_file(os.path.join(rundir, "sampler.out"))
-        sampler_job.set_stderr_file(os.path.join(rundir, "sampler.err"))
-        sampler_job.add_condor_cmd("accounting_group", ligo_accounting_group)
-        sampler_job.add_condor_cmd("accounting_group_user", ligo_accounting_user)
-        sampler_job.add_condor_cmd("request_memory", "10000")
-        sampler_job.add_condor_cmd("request_disk", "10000")
-        sampler_job.add_condor_cmd("notification", "never")
-        sampler_job.add_condor_cmd("initialdir", rundir)
-        sampler_job.add_condor_cmd("get_env", "True")
-        sampler_args = f"{config_in_rundir} --sampling-mode"
-        sampler_job.add_arg(sampler_args)
-        sampler_job.set_sub_file(os.path.join(rundir, "sampler.sub"))
-        sampler_node = sampler_job.create_node()
-        sampler_node.set_retry(5)
-
-        scattering_dag.add_node(sampler_node)
-        scattering_dag.write_sub_files()
-        scattering_dag.write_dag()
-
-        os.system(f"condor_submit_dag {os.path.join(rundir, 'dag_scattering_PE.dag')}")
-
-    elif opts_dict["sampling_mode"]:
-        Scattering = SampleScattering(**opts_dict)
-        Scattering.setup_waveform_generator()
-        if f"{opts_dict['label']}_{Scattering.ifo}.pkl" in opts_dict["outdir"]:
-            Scattering.ifos = [
-                bilby.gw.detector.interferometer.interferometer.from_pickle(
-                    filename=f"{opts_dict['label']}_{Scattering.ifo}.pkl"
-                )
-            ]
-        else:
-            if "injection_parameters" in opts_dict.keys():
-                Scattering.initialize_injection_data()
-            else:
-                Scattering.initialize_real_data()
-        Scattering.setup_likelihood()
-        Scattering.sanitize_input_prior()
-        Scattering.run_sampler()
-        Scattering.produce_corner()
-
+    # if local directory make global path, if global use global
+    if arguments.outdir[-1] == "/":
+        rundir = arguments.outdir
     else:
-        print("No mode of execution passed")
+        rundir = os.path.join(os.getcwd(), arguments.outdir)
+
+    # ligo_accounting_group = arguments.ligo_accounting
+    # ligo_accounting_user = arguments.ligo_user_name
+
+    # make sure the run doesn't already exist, and make the directory
+    assert not os.path.isdir(rundir)
+    os.mkdir(rundir)
+
+    # make a dict amenable to writing into the local config, and do the writing
+    config_in_rundir = os.path.join(rundir, f"{arguments.label}.cfg")
+    prior_in_rundir = os.path.join(rundir, f"{arguments.label}.prior")
+    shutil.copy(arguments.prior_file, prior_in_rundir)
+    if arguments.channel == "fake":
+        injection_in_rundir = os.path.join(rundir, f"{arguments.label}.injection")
+        shutil.copy(arguments.injection_file, injection_in_rundir)
+    arguments_dict = arguments.__dict__
+    arguments_dict.pop("ini")
+    write_dict = copy.deepcopy(arguments_dict)
+    for key, value in arguments_dict.items():
+        write_dict[key.replace("_", "-")] = str(write_dict.pop(key))
+    parser = configparser.ConfigParser()
+    parser["Arguments"] = write_dict
+    with open(config_in_rundir, "w") as f:
+        parser.write(f)
+    """
+    # setup the submit file
+    scattering_dag = pipeline.CondorDAG(
+        log=os.path.join(rundir, "dag_scattering_PE.log")
+    )
+    scattering_dag.set_dag_file(os.path.join(rundir, "dag_scattering_PE"))
+
+    sampler_exe = __file__
+    sampler_job = pipeline.CondorDAGJob(universe="vanilla", executable=sampler_exe)
+    sampler_job.set_log_file(os.path.join(rundir, "sampler.log"))
+    sampler_job.set_stdout_file(os.path.join(rundir, "sampler.out"))
+    sampler_job.set_stderr_file(os.path.join(rundir, "sampler.err"))
+    sampler_job.add_condor_cmd("accounting_group", ligo_accounting_group)
+    sampler_job.add_condor_cmd("accounting_group_user", ligo_accounting_user)
+    sampler_job.add_condor_cmd("request_memory", "10000")
+    sampler_job.add_condor_cmd("request_disk", "10000")
+    sampler_job.add_condor_cmd("notification", "never")
+    sampler_job.add_condor_cmd("initialdir", rundir)
+    sampler_job.add_condor_cmd("get_env", "True")
+    sampler_args = f"{config_in_rundir} --sampling-mode"
+    sampler_job.add_arg(sampler_args)
+    sampler_job.set_sub_file(os.path.join(rundir, "sampler.sub"))
+    sampler_node = sampler_job.create_node()
+    sampler_node.set_retry(5)
+
+    scattering_dag.add_node(sampler_node)
+    scattering_dag.write_sub_files()
+    scattering_dag.write_dag()
+
+    os.system(f"condor_submit_dag {os.path.join(rundir, 'dag_scattering_PE.dag')}")
+    """
+
+
+"""
+def perform_inference():
+    Scattering = SampleScattering(**opts_dict)
+    Scattering.setup_waveform_generator()
+    if f"{opts_dict['label']}_{Scattering.ifo}.pkl" in opts_dict["outdir"]:
+        Scattering.ifos = [
+            bilby.gw.detector.interferometer.interferometer.from_pickle(
+                filename=f"{opts_dict['label']}_{Scattering.ifo}.pkl"
+            )
+        ]
+    else:
+        if "injection_parameters" in opts_dict.keys():
+            Scattering.initialize_injection_data()
+        else:
+            Scattering.initialize_real_data()
+    Scattering.setup_likelihood()
+    Scattering.sanitize_input_prior()
+    Scattering.run_sampler()
+    Scattering.produce_corner()
+"""
