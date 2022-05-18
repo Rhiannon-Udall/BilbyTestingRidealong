@@ -188,8 +188,15 @@ class SampleScattering(object):
         )
         parser_sampler.add_argument(
             "--sampler-kwargs",
-            default="",
+            default="{}",
             help="Kwargs to pass to the sampler",
+        )
+        parser_plot = parser.add_argument_group(
+            title="Plotting Arguments",
+            description="Arguments to go to the plotting functions for the data",
+        )
+        parser_plot.add_argument(
+            "--q-value", default="20", help="The Q value to fix the spectrogram at"
         )
         arguments = parser.parse_args()
         return arguments
@@ -223,7 +230,7 @@ class SampleScattering(object):
                     # split up key and arg, evaluate the arg
                     key = line.split("=")[0].strip()
                     args = "=".join(line.split("=")[1:])
-                    prior_dict[key] = ast.literal_eval(args)
+                    prior_dict[key] = eval(args)
                 # except out of malformed lines
                 except SyntaxError:
                     logger.info(f"Could not add line {line} to the PriorDict")
@@ -259,10 +266,10 @@ class SampleScattering(object):
                     # split up key and arg, evaluate the arg
                     key = line.split("=")[0].strip()
                     args = "=".join(line.split("=")[1:])
-                    injection_dict[key] = ast.literal_eval(args)
+                    injection_dict[key] = eval(args)
                 # except out of malformed lines
                 except SyntaxError:
-                    logger.info(f"Could not add line {line} to the PriorDict")
+                    logger.info(f"Could not add line {line} to the injection args")
                     logger.exception("The exception was")
         return injection_dict
 
@@ -357,6 +364,8 @@ class SampleScattering(object):
             self.prior_dict,
         )
 
+        self.zero_noise = ast.literal_eval(self.zero_noise)
+
         # set our specific definition of start time
         self.start_time = self.trigger_time - 3 * self.duration / 4
         return
@@ -388,6 +397,32 @@ class SampleScattering(object):
         # add the specific function to the model map
         self._model_map[shorthand_name] = getattr(function_module, function_name)
 
+    def construct_injection_fixed_kwargs(self):
+        """
+        Sets injection default kwargs and updates them with passed fixed kwargs
+        """
+        default_injection_fixed_kwargs = dict(
+            ifo_name="L1",
+            number_harmonics=1,
+        )
+        self.injection_fixed_kwargs = ast.literal_eval(self.injection_fixed_kwargs)
+        default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+        default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
+        self.injection_fixed_kwargs = default_injection_fixed_kwargs
+
+    def construct_likelihood_fixed_kwargs(self):
+        """
+        Sets likelihood defaault kwargs and updates them with passed fixed kwargs
+        """
+        self.likelihood_fixed_kwargs = ast.literal_eval(self.likelihood_fixed_kwargs)
+        default_likelihood_fixed_kwargs = dict(
+            ifo_name="L1",
+            number_harmonics=1,
+        )
+        default_likelihood_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+        default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
+        self.likelihood_fixed_kwargs = default_likelihood_fixed_kwargs
+
     def setup_waveform_generator(self, model_name, model_kwargs):
         """
         Make a waveform generator for the data constraints and given model
@@ -409,7 +444,7 @@ class SampleScattering(object):
         )
         return waveform_generator
 
-    def initialize(self):
+    def create_data(self):
         """
         Create the ifo object - either read frame or generate noise and inject
 
@@ -429,19 +464,14 @@ class SampleScattering(object):
             self.injection_args = self.make_injection_dict(self.original_arguments)
 
             # Setup and update injection waveform kwargs
-            default_injection_fixed_kwargs = dict(
-                ifo_name="L1",
-                number_harmonics=1,
-            )
-            default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
-            default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
-            self.injection_fixed_kwargs = default_injection_fixed_kwargs
+            self.construct_injection_fixed_kwargs()
 
             # Get a WF generator for the injection
             self.injection_waveform_generator = self.setup_waveform_generator(
                 self.injection_model,
                 self.injection_fixed_kwargs,
             )
+
             # Make the Interferometer, with injection and generated noise
             self.ifo = get_interferometer_with_fake_noise_and_injection(
                 self.ifo_name,
@@ -456,13 +486,14 @@ class SampleScattering(object):
                 plot=True,
                 save=False,
                 zero_noise=self.zero_noise,
+                raise_error=False,
             )
         else:
             # The case of reading in real data
             # Defaults for how to make a PSD, then update and separate out positional args
             psd_gen_default_kwargs = dict(
                 psd_start_time=self.start_time - 32,
-                psd_duration=32,
+                psd_duration=64,
                 roll_off=0.2,
                 overlap=0,
             )
@@ -470,6 +501,7 @@ class SampleScattering(object):
             self.psd_gen_kwargs = psd_gen_default_kwargs
             self.psd_start_time = self.psd_gen_kwargs.pop("psd_start_time")
             self.psd_duration = self.psd_gen_kwargs.pop("psd_duration")
+
             # Get the data, and make the PSD
             self.ifo = load_data_by_channel_name(
                 self.channel,
@@ -481,15 +513,35 @@ class SampleScattering(object):
                 outdir=self.outdir,
                 **self.psd_gen_kwargs,
             )
+
         # Set our analysis minimum frequency, and save the data
         self.ifo.minimum_frequency = self.minimum_frequency
         self.ifo.save_data(
             self.outdir,
             label=self.label,
         )
+
         # Make a timeseries for plotting
         self.tseries_gwpy = self.ifo.strain_data.to_gwpy_timeseries()
         return self.ifo
+
+    def read_data(self):
+        """
+        Reads in previously created interferometer object
+        """
+        if self.channel == "fake":
+            # make the injection args, since they are used for the result plot
+            self.injection_args = self.make_injection_dict(self.original_arguments)
+
+            # Setup and update injection waveform kwargs
+            self.injection
+            default_injection_fixed_kwargs = dict(
+                ifo_name="L1",
+                number_harmonics=1,
+            )
+            default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+            default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
+            self.injection_fixed_kwargs = default_injection_fixed_kwargs
 
     def plot_tseries_data(self):
         """
@@ -510,8 +562,8 @@ class SampleScattering(object):
         ax = fig.gca()
         if self.channel == "fake":
             signal = self.injection_waveform_generator.time_domain_strain(
-                **self.injection_args
-            )
+                parameters=self.injection_args,
+            )["plus"]
             ax.plot(
                 self.tseries_gwpy.times,
                 signal,
@@ -524,8 +576,8 @@ class SampleScattering(object):
         ax.legend()
         fig.savefig(
             os.path.join(
-                self.arguments.outdir,
-                f"{self.arguments.label}_tseries_data.png",
+                self.outdir,
+                f"{self.label}_tseries_data.png",
             )
         )
 
@@ -542,19 +594,20 @@ class SampleScattering(object):
         plot
             The matplotlib plot object
         """
-        qspecgram = self.tseries_gwpy.q_transform(qrange=[20, 20])
+        self.q_value = ast.literal_eval(self.q_value)
+        qspecgram = self.tseries_gwpy.q_transform(qrange=[self.q_value, self.q_value])
         fig = qspecgram.plot(figsize=[8, 6])
         ax = fig.gca()
         # ax.set_epoch(0)
         ax.set_yscale("log")
         ax.set_xlabel("Time [seconds]")
-        ax.set_ylim(16, 512)
+        ax.set_ylim(self.minimum_frequency, 512)
         ax.grid(True, axis="y", which="both")
         fig.add_colorbar(cmap="viridis", label="Normalized energy", vmin=0, vmax=50)
         fig.savefig(
             os.path.join(
-                self.arguments.outdir,
-                f"{self.arguments.label}_qscan_data.png",
+                self.outdir,
+                f"{self.label}_qscan_data.png",
             )
         )
 
@@ -562,12 +615,6 @@ class SampleScattering(object):
 
     def setup_likelihood(self):
         # define likelihood function
-        default_likelihood_fixed_kwargs = dict(
-            ifo_name="L1",
-            number_harmonics=1,
-        )
-        default_likelihood_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
-        default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_waveform_generator = self.setup_waveform_generator(
             self.likelihood_model,
             self.likelihood_fixed_kwargs,
@@ -637,8 +684,8 @@ def setup_job():
     else:
         rundir = os.path.join(os.getcwd(), arguments.outdir)
 
-    # ligo_accounting_group = arguments.ligo_accounting
-    # ligo_accounting_user = arguments.ligo_user_name
+    ligo_accounting_group = arguments.ligo_accounting
+    ligo_accounting_user = arguments.ligo_user_name
 
     # make sure the run doesn't already exist, and make the directory
     assert not os.path.isdir(rundir)
@@ -648,9 +695,11 @@ def setup_job():
     config_in_rundir = os.path.join(rundir, f"{arguments.label}.cfg")
     prior_in_rundir = os.path.join(rundir, f"{arguments.label}.prior")
     shutil.copy(arguments.prior_file, prior_in_rundir)
+    arguments.prior_file = prior_in_rundir
     if arguments.channel == "fake":
         injection_in_rundir = os.path.join(rundir, f"{arguments.label}.injection")
         shutil.copy(arguments.injection_file, injection_in_rundir)
+        arguments.injection_file = injection_in_rundir
     arguments_dict = arguments.__dict__
     arguments_dict.pop("ini")
     write_dict = copy.deepcopy(arguments_dict)
@@ -660,14 +709,14 @@ def setup_job():
     parser["Arguments"] = write_dict
     with open(config_in_rundir, "w") as f:
         parser.write(f)
-    """
+
     # setup the submit file
     scattering_dag = pipeline.CondorDAG(
         log=os.path.join(rundir, "dag_scattering_PE.log")
     )
     scattering_dag.set_dag_file(os.path.join(rundir, "dag_scattering_PE"))
 
-    sampler_exe = __file__
+    sampler_exe = shutil.which("scattering_run")
     sampler_job = pipeline.CondorDAGJob(universe="vanilla", executable=sampler_exe)
     sampler_job.set_log_file(os.path.join(rundir, "sampler.log"))
     sampler_job.set_stdout_file(os.path.join(rundir, "sampler.out"))
@@ -679,7 +728,7 @@ def setup_job():
     sampler_job.add_condor_cmd("notification", "never")
     sampler_job.add_condor_cmd("initialdir", rundir)
     sampler_job.add_condor_cmd("get_env", "True")
-    sampler_args = f"{config_in_rundir} --sampling-mode"
+    sampler_args = f"{config_in_rundir}"
     sampler_job.add_arg(sampler_args)
     sampler_job.set_sub_file(os.path.join(rundir, "sampler.sub"))
     sampler_node = sampler_job.create_node()
@@ -689,27 +738,20 @@ def setup_job():
     scattering_dag.write_sub_files()
     scattering_dag.write_dag()
 
-    os.system(f"condor_submit_dag {os.path.join(rundir, 'dag_scattering_PE.dag')}")
-    """
+    Scattering = SampleScattering(arguments)
+    Scattering.create_data()
+    Scattering.plot_tseries_data()
+    Scattering.plot_qscan_data()
+
+    # os.system(f"condor_submit_dag {os.path.join(rundir, 'dag_scattering_PE.dag')}")
 
 
-"""
 def perform_inference():
-    Scattering = SampleScattering(**opts_dict)
-    Scattering.setup_waveform_generator()
-    if f"{opts_dict['label']}_{Scattering.ifo}.pkl" in opts_dict["outdir"]:
-        Scattering.ifos = [
-            bilby.gw.detector.interferometer.interferometer.from_pickle(
-                filename=f"{opts_dict['label']}_{Scattering.ifo}.pkl"
-            )
-        ]
-    else:
-        if "injection_parameters" in opts_dict.keys():
-            Scattering.initialize_injection_data()
-        else:
-            Scattering.initialize_real_data()
-    Scattering.setup_likelihood()
-    Scattering.sanitize_input_prior()
-    Scattering.run_sampler()
-    Scattering.produce_corner()
-"""
+
+    # arguments = SampleScattering.parse_args_and_config()
+    # Scattering = SampleScattering(arguments)
+    """
+    Scattering.read_data
+
+    """
+    return
