@@ -18,6 +18,7 @@ from bilby.gw.detector import (
     get_interferometer_with_fake_noise_and_injection,
     load_data_by_channel_name,
 )
+from bilby.gw.detector.interferometer import Interferometer
 from bilby.gw.likelihood import GravitationalWaveTransient
 from bilby.gw.scattering import slow_scattering_wrapper
 from bilby.gw.waveform_generator import WaveformGenerator
@@ -444,7 +445,7 @@ class SampleScattering(object):
         )
         return waveform_generator
 
-    def create_data(self):
+    def create_ifo(self):
         """
         Create the ifo object - either read frame or generate noise and inject
 
@@ -516,7 +517,7 @@ class SampleScattering(object):
 
         # Set our analysis minimum frequency, and save the data
         self.ifo.minimum_frequency = self.minimum_frequency
-        self.ifo.save_data(
+        self.ifo.to_pickle(
             self.outdir,
             label=self.label,
         )
@@ -525,7 +526,7 @@ class SampleScattering(object):
         self.tseries_gwpy = self.ifo.strain_data.to_gwpy_timeseries()
         return self.ifo
 
-    def read_data(self):
+    def load_ifo(self):
         """
         Reads in previously created interferometer object
         """
@@ -534,14 +535,10 @@ class SampleScattering(object):
             self.injection_args = self.make_injection_dict(self.original_arguments)
 
             # Setup and update injection waveform kwargs
-            self.injection
-            default_injection_fixed_kwargs = dict(
-                ifo_name="L1",
-                number_harmonics=1,
-            )
-            default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
-            default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
-            self.injection_fixed_kwargs = default_injection_fixed_kwargs
+            self.construct_injection_fixed_kwargs()
+        self.ifo = Interferometer.from_pickle(
+            os.path.join(self.outdir, f"{self.label}.pkl")
+        )
 
     def plot_tseries_data(self):
         """
@@ -614,7 +611,10 @@ class SampleScattering(object):
         return ax, fig
 
     def setup_likelihood(self):
-        # define likelihood function
+        """
+        Prepares the likelihood function given the
+        """
+        self.construct_likelihood_fixed_kwargs()
         self.likelihood_waveform_generator = self.setup_waveform_generator(
             self.likelihood_model,
             self.likelihood_fixed_kwargs,
@@ -671,6 +671,9 @@ _model_map = dict(
 
 
 def setup_job():
+    """
+    Method for constructing dag and setting up data for scattering inference job
+    """
     arguments = SampleScattering.parse_args_and_config()
 
     # imports
@@ -678,28 +681,32 @@ def setup_job():
 
     from glue import pipeline
 
-    # if local directory make global path, if global use global
-    if arguments.outdir[-1] == "/":
-        rundir = arguments.outdir
-    else:
-        rundir = os.path.join(os.getcwd(), arguments.outdir)
+    # if local directory make global path, if global use it
+    if arguments.outdir[-1] != "/":
+        arguments.outdir = os.path.join(os.getcwd(), arguments.outdir)
 
     ligo_accounting_group = arguments.ligo_accounting
     ligo_accounting_user = arguments.ligo_user_name
 
     # make sure the run doesn't already exist, and make the directory
-    assert not os.path.isdir(rundir)
-    os.mkdir(rundir)
+    assert not os.path.isdir(arguments.outdir)
+    os.mkdir(arguments.outdir)
 
-    # make a dict amenable to writing into the local config, and do the writing
-    config_in_rundir = os.path.join(rundir, f"{arguments.label}.cfg")
-    prior_in_rundir = os.path.join(rundir, f"{arguments.label}.prior")
+    # copy over prior, reassign path to copy
+    prior_in_rundir = os.path.join(arguments.outdir, f"{arguments.label}.prior")
     shutil.copy(arguments.prior_file, prior_in_rundir)
     arguments.prior_file = prior_in_rundir
+
+    # copy over injection if necessary, reassign path to copy
     if arguments.channel == "fake":
-        injection_in_rundir = os.path.join(rundir, f"{arguments.label}.injection")
+        injection_in_rundir = os.path.join(
+            arguments.outdir, f"{arguments.label}.injection"
+        )
         shutil.copy(arguments.injection_file, injection_in_rundir)
         arguments.injection_file = injection_in_rundir
+
+    # write config in clean way
+    config_in_rundir = os.path.join(arguments.outdir, f"{arguments.label}.cfg")
     arguments_dict = arguments.__dict__
     arguments_dict.pop("ini")
     write_dict = copy.deepcopy(arguments_dict)
@@ -712,46 +719,57 @@ def setup_job():
 
     # setup the submit file
     scattering_dag = pipeline.CondorDAG(
-        log=os.path.join(rundir, "dag_scattering_PE.log")
+        log=os.path.join(arguments.outdir, "dag_scattering_PE.log")
     )
-    scattering_dag.set_dag_file(os.path.join(rundir, "dag_scattering_PE"))
+    scattering_dag.set_dag_file(os.path.join(arguments.outdir, "dag_scattering_PE"))
 
+    # Make the sub and node
     sampler_exe = shutil.which("scattering_run")
     sampler_job = pipeline.CondorDAGJob(universe="vanilla", executable=sampler_exe)
-    sampler_job.set_log_file(os.path.join(rundir, "sampler.log"))
-    sampler_job.set_stdout_file(os.path.join(rundir, "sampler.out"))
-    sampler_job.set_stderr_file(os.path.join(rundir, "sampler.err"))
+    sampler_job.set_log_file(os.path.join(arguments.outdir, "sampler.log"))
+    sampler_job.set_stdout_file(os.path.join(arguments.outdir, "sampler.out"))
+    sampler_job.set_stderr_file(os.path.join(arguments.outdir, "sampler.err"))
     sampler_job.add_condor_cmd("accounting_group", ligo_accounting_group)
     sampler_job.add_condor_cmd("accounting_group_user", ligo_accounting_user)
     sampler_job.add_condor_cmd("request_memory", "10000")
     sampler_job.add_condor_cmd("request_disk", "10000")
     sampler_job.add_condor_cmd("notification", "never")
-    sampler_job.add_condor_cmd("initialdir", rundir)
+    sampler_job.add_condor_cmd("initialdir", arguments.outdir)
     sampler_job.add_condor_cmd("get_env", "True")
     sampler_args = f"{config_in_rundir}"
     sampler_job.add_arg(sampler_args)
-    sampler_job.set_sub_file(os.path.join(rundir, "sampler.sub"))
+    sampler_job.set_sub_file(os.path.join(arguments.outdir, "sampler.sub"))
     sampler_node = sampler_job.create_node()
     sampler_node.set_retry(5)
 
+    # Construct the dag and write files
     scattering_dag.add_node(sampler_node)
     scattering_dag.write_sub_files()
     scattering_dag.write_dag()
 
+    # Make the data, save, and plot
     Scattering = SampleScattering(arguments)
-    Scattering.create_data()
+    Scattering.create_ifo()
     Scattering.plot_tseries_data()
     Scattering.plot_qscan_data()
 
-    # os.system(f"condor_submit_dag {os.path.join(rundir, 'dag_scattering_PE.dag')}")
+    # Launch the condor job
+    # os.system(f"condor_submit_dag {os.path.join(arguments.outdir, 'dag_scattering_PE.dag')}")
 
 
 def perform_inference():
-
-    # arguments = SampleScattering.parse_args_and_config()
-    # Scattering = SampleScattering(arguments)
     """
-    Scattering.read_data
-
+    Method for performing scattering inference
     """
+
+    # Setup scattering object
+    arguments = SampleScattering.parse_args_and_config()
+    Scattering = SampleScattering(arguments)
+
+    # Load data, setup likelihood, run, make corner
+    Scattering.load_ifo()
+    Scattering.setup_likelihood()
+    Scattering.Sample()
+    Scattering.produce_corner()
+
     return
