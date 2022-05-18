@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 class SampleScattering(object):
     @staticmethod
-    def parse_args_and_config():
+    def parse_args_and_config(config_file=None):
         # Setup args and parser - note ini is a positional arg, passed when called from the command line
         # All other args are internal to the config, but can also be command-line edited
 
@@ -199,7 +199,10 @@ class SampleScattering(object):
         parser_plot.add_argument(
             "--q-value", default="20", help="The Q value to fix the spectrogram at"
         )
-        arguments = parser.parse_args()
+        if config_file is None:
+            arguments = parser.parse_args()
+        else:
+            arguments = parser.parse_args([config_file])
         return arguments
 
     @staticmethod
@@ -424,6 +427,19 @@ class SampleScattering(object):
         default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_fixed_kwargs = default_likelihood_fixed_kwargs
 
+    def construct_sampler_kwargs_and_defaults(self):
+        """
+        Sets default sampler kwargs and updates them with passed kwargs
+        """
+        default_sampler_kwargs = dict(
+            sample="rwalk",
+            npoints=1000,
+            dlogz=0.1,
+            proposals=["diff", "walk", "snooker"],
+        )
+        default_sampler_kwargs.update(ast.literal_eval(self.sampler_kwargs))
+        self.sampler_kwargs = default_sampler_kwargs
+
     def setup_waveform_generator(self, model_name, model_kwargs):
         """
         Make a waveform generator for the data constraints and given model
@@ -612,7 +628,7 @@ class SampleScattering(object):
 
     def setup_likelihood(self):
         """
-        Prepares the likelihood function given the
+        Prepares the likelihood function given the kwargs and model
         """
         self.construct_likelihood_fixed_kwargs()
         self.likelihood_waveform_generator = self.setup_waveform_generator(
@@ -637,14 +653,8 @@ class SampleScattering(object):
         if "injection_args" not in self.__dict__.keys():
             self.injection_args = None
 
-        default_sampler_kwargs = dict(
-            sample="rwalk",
-            npoints=1000,
-            dlogz=0.1,
-            proposals=["diff", "walk", "snooker"],
-        )
-        default_sampler_kwargs.update(self.sampler_kwargs)
-        self.sampler_kwargs = default_sampler_kwargs
+        self.construct_sampler_kwargs_and_defaults()
+
         self.result = run_sampler(
             self.likelihood,
             self.prior_dict,
@@ -652,7 +662,7 @@ class SampleScattering(object):
             outdir=self.outdir,
             label=self.label,
             resume=True,
-            injection_parameters=self.injection_parameters,
+            injection_parameters=self.injection_args,
             **self.sampler_kwargs,
         )
         return self.result
@@ -754,7 +764,9 @@ def setup_job():
     Scattering.plot_qscan_data()
 
     # Launch the condor job
-    # os.system(f"condor_submit_dag {os.path.join(arguments.outdir, 'dag_scattering_PE.dag')}")
+    os.system(
+        f"condor_submit_dag {os.path.join(arguments.outdir, 'dag_scattering_PE.dag')}"
+    )
 
 
 def perform_inference():
@@ -769,7 +781,7 @@ def perform_inference():
     # Load data, setup likelihood, run, make corner
     Scattering.load_ifo()
     Scattering.setup_likelihood()
-    Scattering.Sample()
+    Scattering.sample()
     Scattering.produce_corner()
 
     return
