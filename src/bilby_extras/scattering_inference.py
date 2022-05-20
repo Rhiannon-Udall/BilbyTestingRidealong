@@ -177,6 +177,12 @@ class SampleScattering(object):
             default="{}",
             help="Fixed kwargs which should not be sampled over, to pass as **kwargs to the model",
         )
+        parser_likelihood.add_argument(
+            "--time-marginalization",
+            default="False",
+            help="Turns on time marginalization in the likelihood call\
+            - requires assumption that arches will share a central time",
+        )
         parser_sampler = parser.add_argument_group(
             title="Sampler Arguments",
             description="Arguments to pass to the sampler",
@@ -467,6 +473,10 @@ class SampleScattering(object):
             The name of the model (the key in _model_map)
         model_kwargs
             The fixed kwargs necessary to pass to the model
+
+        See Also
+        ------------
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/waveform_generator.py#L9
         """
         waveform_generator = WaveformGenerator(
             duration=self.duration,
@@ -486,6 +496,12 @@ class SampleScattering(object):
         ---------
         self.ifo
             The Interferometer object containing the data
+
+        See Also
+        -----------
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/detector/__init__.py#L126
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/detector/__init__.py#L299
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/detector/psd.py#L11
         """
         if self.channel == "fake":
             # The case that this is an injection run
@@ -562,6 +578,10 @@ class SampleScattering(object):
     def load_ifo(self):
         """
         Reads in previously created interferometer object
+
+        See Also
+        ------------
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/detector/interferometer.py#L14
         """
         if self.channel == "fake":
             # make the injection args, since they are used for the result plot
@@ -647,16 +667,23 @@ class SampleScattering(object):
     def setup_likelihood(self):
         """
         Prepares the likelihood function given the kwargs and model
+
+        See Also
+        ---------------
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/gw/likelihood/base.py#L18
         """
         self.construct_likelihood_fixed_kwargs()
         self.likelihood_waveform_generator = self.setup_waveform_generator(
             self.likelihood_model,
             self.likelihood_fixed_kwargs,
         )
+        self.time_marginalization = ast.literal_eval(self.time_marginalization)
         self.likelihood = GravitationalWaveTransient(
             interferometers=[self.ifo],
             waveform_generator=self.likelihood_waveform_generator,
             time_reference=self.ifo_name,
+            time_marginalization=self.time_marginalization,
+            jitter_time=self.time_marginalization,
         )
 
     def sample(self):
@@ -667,6 +694,10 @@ class SampleScattering(object):
         ---------
         self.result
             The completed result object
+
+        See Also
+        -------------
+        https://git.ligo.org/lscsoft/bilby/-/blob/master/bilby/core/sampler/base_sampler.py
         """
         if "injection_args" not in self.__dict__.keys():
             self.injection_args = None
