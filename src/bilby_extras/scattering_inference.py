@@ -411,12 +411,15 @@ class SampleScattering(object):
         ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
         ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
 
+        time_array = np.linspace(0, self.duration, self.duration * self.sampling_rate)
         self.injection_fixed_kwargs = ast.literal_eval(self.injection_fixed_kwargs)
         default_injection_fixed_kwargs = dict(
             ifo_delay=ifo_delay_time,
             number_harmonics=1,
             duration=self.duration,
             sampling_rate=self.sampling_rate,
+            centered_arches=True,
+            time_array=time_array,
         )
         default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
         self.injection_fixed_kwargs = default_injection_fixed_kwargs
@@ -428,12 +431,15 @@ class SampleScattering(object):
         ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
         ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
 
+        time_array = np.linspace(0, self.duration, self.duration * self.sampling_rate)
         self.likelihood_fixed_kwargs = ast.literal_eval(self.likelihood_fixed_kwargs)
         default_likelihood_fixed_kwargs = dict(
             ifo_delay=ifo_delay_time,
             number_harmonics=1,
             duration=self.duration,
             sampling_rate=self.sampling_rate,
+            centered_arches=True,
+            time_array=time_array,
         )
         default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_fixed_kwargs = default_likelihood_fixed_kwargs
