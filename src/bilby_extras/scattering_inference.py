@@ -20,7 +20,7 @@ from bilby.gw.detector import (
 )
 from bilby.gw.detector.interferometer import Interferometer
 from bilby.gw.likelihood import GravitationalWaveTransient
-from bilby.gw.scattering import slow_scattering_wrapper
+from bilby.gw.scattering import slow_scattering
 from bilby.gw.waveform_generator import WaveformGenerator
 
 logging.basicConfig(level=logging.INFO)
@@ -335,7 +335,9 @@ class SampleScattering(object):
             The prior_dict with all necessary extra parameters fixed
         """
         # get the non-time named kwargs
-        model_kwargs = [x for x in inspect.getargspec(model_function)[0] if x != "t"]
+        model_kwargs = [
+            x for x in inspect.getargspec(model_function)[0] if x != "f" and x != "t"
+        ]
         # get their defaults
         model_kwarg_defaults = inspect.getargspec(model_function)[-1]
         # for named kwargs, if they aren't already in the prior, add them as a delta function at their default value
@@ -371,7 +373,8 @@ class SampleScattering(object):
         self.zero_noise = ast.literal_eval(self.zero_noise)
 
         # set our specific definition of start time
-        self.start_time = self.trigger_time - 3 * self.duration / 4
+        self.start_time = self.trigger_time - self.duration + 2
+        logger.info(f"Start time of data segment is {self.start_time}")
         return
 
     def add_model(self, source, shorthand_name, function_name):
@@ -405,12 +408,16 @@ class SampleScattering(object):
         """
         Sets injection default kwargs and updates them with passed fixed kwargs
         """
-        default_injection_fixed_kwargs = dict(
-            ifo_name="L1",
-            number_harmonics=1,
-        )
+        ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
+        ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
+
         self.injection_fixed_kwargs = ast.literal_eval(self.injection_fixed_kwargs)
-        default_injection_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
+        default_injection_fixed_kwargs = dict(
+            ifo_delay=ifo_delay_time,
+            number_harmonics=1,
+            duration=self.duration,
+            sampling_rate=self.sampling_rate,
+        )
         default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
         self.injection_fixed_kwargs = default_injection_fixed_kwargs
 
@@ -418,12 +425,16 @@ class SampleScattering(object):
         """
         Sets likelihood defaault kwargs and updates them with passed fixed kwargs
         """
+        ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
+        ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
+
         self.likelihood_fixed_kwargs = ast.literal_eval(self.likelihood_fixed_kwargs)
         default_likelihood_fixed_kwargs = dict(
-            ifo_name="L1",
+            ifo_delay=ifo_delay_time,
             number_harmonics=1,
+            duration=self.duration,
+            sampling_rate=self.sampling_rate,
         )
-        default_likelihood_fixed_kwargs.update(dict(ifo_name=self.ifo_name))
         default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_fixed_kwargs = default_likelihood_fixed_kwargs
 
@@ -454,7 +465,7 @@ class SampleScattering(object):
         waveform_generator = WaveformGenerator(
             duration=self.duration,
             sampling_frequency=self.sampling_rate,
-            time_domain_source_model=self._model_map[model_name],
+            frequency_domain_source_model=self._model_map[model_name],
             waveform_arguments=model_kwargs,
             parameter_conversion=None,
             start_time=self.start_time,
@@ -514,7 +525,7 @@ class SampleScattering(object):
                 roll_off=0.2,
                 overlap=0,
             )
-            psd_gen_default_kwargs.update(self.psd_gen_kwargs)
+            psd_gen_default_kwargs.update(ast.literal_eval(self.psd_gen_kwargs))
             self.psd_gen_kwargs = psd_gen_default_kwargs
             self.psd_start_time = self.psd_gen_kwargs.pop("psd_start_time")
             self.psd_duration = self.psd_gen_kwargs.pop("psd_duration")
@@ -574,12 +585,13 @@ class SampleScattering(object):
         )
         ax = fig.gca()
         if self.channel == "fake":
-            signal = self.injection_waveform_generator.time_domain_strain(
+            hoff = self.injection_waveform_generator.frequency_domain_strain(
                 parameters=self.injection_args,
             )["plus"]
+            hoft = bilby.core.utils.infft(hoff, self.sampling_rate)
             ax.plot(
                 self.tseries_gwpy.times,
-                signal,
+                hoft,
                 linestyle="--",
                 color="r",
                 label="Injected Signal",
@@ -675,7 +687,7 @@ class SampleScattering(object):
 
 
 _model_map = dict(
-    slow_scattering=bilby.gw.scattering.slow_scattering_wrapper,
+    slow_scattering=slow_scattering,
     # fast_scattering = bilby.gw.scattering.fast_scattering_wrapper,
 )
 
