@@ -11,7 +11,7 @@ import bilby
 import configargparse as cfg
 import matplotlib.pyplot as plt
 import numpy as np
-from bilby.core.prior import DeltaFunction
+from bilby.core.prior import DeltaFunction, PriorDict
 from bilby.core.sampler import run_sampler
 from bilby.gw.detector import (
     PowerSpectralDensity,
@@ -360,6 +360,9 @@ class SampleScattering(object):
         for key, val in arguments.__dict__.items():
             setattr(self, key, val)
 
+        self.zero_noise = ast.literal_eval(self.zero_noise)
+        self.time_marginalization = ast.literal_eval(self.time_marginalization)
+
         # make a copy of the model_map, and add to it if requested
         self._model_map = copy.copy(_model_map)
         self.add_custom_model = ast.literal_eval(self.add_custom_model)
@@ -375,8 +378,6 @@ class SampleScattering(object):
             self._model_map[self.likelihood_model],
             self.prior_dict,
         )
-
-        self.zero_noise = ast.literal_eval(self.zero_noise)
 
         # set our specific definition of start time
         self.start_time = self.trigger_time - self.duration + 2
@@ -652,7 +653,7 @@ class SampleScattering(object):
         # ax.set_epoch(0)
         ax.set_yscale("log")
         ax.set_xlabel("Time [seconds]")
-        ax.set_ylim(self.minimum_frequency, 512)
+        ax.set_ylim(self.minimum_frequency, self.sampling_rate / 2)
         ax.grid(True, axis="y", which="both")
         fig.add_colorbar(cmap="viridis", label="Normalized energy", vmin=0, vmax=50)
         fig.savefig(
@@ -677,13 +678,13 @@ class SampleScattering(object):
             self.likelihood_model,
             self.likelihood_fixed_kwargs,
         )
-        self.time_marginalization = ast.literal_eval(self.time_marginalization)
         self.likelihood = GravitationalWaveTransient(
             interferometers=[self.ifo],
             waveform_generator=self.likelihood_waveform_generator,
-            time_reference=self.ifo_name,
+            time_reference="geocent_time",
             time_marginalization=self.time_marginalization,
             jitter_time=self.time_marginalization,
+            priors=self.prior_dict,
         )
 
     def sample(self):
