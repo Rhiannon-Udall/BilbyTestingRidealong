@@ -19,8 +19,8 @@ from bilby.gw.detector import (
     load_data_by_channel_name,
 )
 from bilby.gw.detector.interferometer import Interferometer
+from bilby.gw.glitch import slow_scattering
 from bilby.gw.likelihood import GravitationalWaveTransient
-from bilby.gw.scattering import slow_scattering
 from bilby.gw.waveform_generator import WaveformGenerator
 
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +45,11 @@ class SampleScattering(object):
         parser_job = parser.add_argument_group(
             title="Job Arguments",
             description="Arguments to govern the creation and description of the job",
+        )
+        parser_job.add_argument(
+            "--no-launch-automatically",
+            action="store_true",
+            help="If passed, do not auto-submit to condor; only use from command line",
         )
         parser_job.add_argument(
             "--ligo-user-name",
@@ -163,6 +168,11 @@ class SampleScattering(object):
             help="kwargs to pass to bilby.gw.load_data_by_channel_name for PSD generation,\
             including psd_duration and psd_start_time",
         )
+        parser_data.add_argument(
+            "--segment-end-offset",
+            default="2",
+            help="The offset between the data segment's geocent_time and the end of the segment",
+        )
         parser_likelihood = parser.add_argument_group(
             title="Likelihood Arguments",
             description="Arguments to use for computing the likelihood",
@@ -192,6 +202,9 @@ class SampleScattering(object):
             type=str,
             default="dynesty",
             help="The sampler to use e.g. Dynesty",
+        )
+        parser_sampler.add_argument(
+            "--npool", type=int, default=8, help="The number of cpus to pool"
         )
         parser_sampler.add_argument(
             "--sampler-kwargs",
@@ -362,6 +375,7 @@ class SampleScattering(object):
 
         self.zero_noise = ast.literal_eval(self.zero_noise)
         self.time_marginalization = ast.literal_eval(self.time_marginalization)
+        self.segment_end_offset = ast.literal_eval(self.segment_end_offset)
 
         # make a copy of the model_map, and add to it if requested
         self._model_map = copy.copy(_model_map)
@@ -372,6 +386,7 @@ class SampleScattering(object):
                 self.add_custom_model[1],
                 self.add_custom_model[2],
             )
+
         # make prior dict
         self.prior_dict = self.make_prior_dict(self.original_arguments)
         self.prior_dict = self.sanitize_input_prior(
@@ -380,7 +395,7 @@ class SampleScattering(object):
         )
 
         # set our specific definition of start time
-        self.start_time = self.trigger_time - self.duration + 2
+        self.start_time = self.trigger_time - self.duration + self.segment_end_offset
         logger.info(f"Start time of data segment is {self.start_time}")
         return
 
@@ -415,18 +430,16 @@ class SampleScattering(object):
         """
         Sets injection default kwargs and updates them with passed fixed kwargs
         """
-        ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
-        ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
-
         time_array = np.linspace(0, self.duration, self.duration * self.sampling_rate)
         self.injection_fixed_kwargs = ast.literal_eval(self.injection_fixed_kwargs)
         default_injection_fixed_kwargs = dict(
-            ifo_delay=ifo_delay_time,
             number_harmonics=1,
             duration=self.duration,
             sampling_rate=self.sampling_rate,
             centered_arches=True,
             time_array=time_array,
+            start_time=self.start_time,
+            end_offset=self.segment_end_offset,
         )
         default_injection_fixed_kwargs.update(self.injection_fixed_kwargs)
         self.injection_fixed_kwargs = default_injection_fixed_kwargs
@@ -435,18 +448,17 @@ class SampleScattering(object):
         """
         Sets likelihood defaault kwargs and updates them with passed fixed kwargs
         """
-        ifo_obj = bilby.gw.detector.get_empty_interferometer(self.ifo_name)
-        ifo_delay_time = ifo_obj.time_delay_from_geocenter(0, 0, self.trigger_time) - 2
 
         time_array = np.linspace(0, self.duration, self.duration * self.sampling_rate)
         self.likelihood_fixed_kwargs = ast.literal_eval(self.likelihood_fixed_kwargs)
         default_likelihood_fixed_kwargs = dict(
-            ifo_delay=ifo_delay_time,
             number_harmonics=1,
             duration=self.duration,
             sampling_rate=self.sampling_rate,
             centered_arches=True,
             time_array=time_array,
+            start_time=self.start_time,
+            end_offset=self.segment_end_offset,
         )
         default_likelihood_fixed_kwargs.update(self.likelihood_fixed_kwargs)
         self.likelihood_fixed_kwargs = default_likelihood_fixed_kwargs
@@ -539,6 +551,7 @@ class SampleScattering(object):
                 zero_noise=self.zero_noise,
                 raise_error=False,
             )
+
         else:
             # The case of reading in real data
             # Defaults for how to make a PSD, then update and separate out positional args
@@ -550,6 +563,7 @@ class SampleScattering(object):
             )
             psd_gen_default_kwargs.update(ast.literal_eval(self.psd_gen_kwargs))
             self.psd_gen_kwargs = psd_gen_default_kwargs
+
             self.psd_start_time = self.psd_gen_kwargs.pop("psd_start_time")
             self.psd_duration = self.psd_gen_kwargs.pop("psd_duration")
 
@@ -557,9 +571,9 @@ class SampleScattering(object):
             self.ifo = load_data_by_channel_name(
                 self.channel,
                 self.start_time,
-                self.psd_start_time,
                 self.duration,
                 self.psd_duration,
+                self.psd_start_time,
                 sampling_frequency=self.sampling_rate,
                 outdir=self.outdir,
                 **self.psd_gen_kwargs,
@@ -614,7 +628,15 @@ class SampleScattering(object):
         if self.channel == "fake":
             hoff = self.injection_waveform_generator.frequency_domain_strain(
                 parameters=self.injection_args,
-            )["plus"]
+            )["glitch"]
+
+            # perform time shift mirroring that in bilby/gw/interferometer:Interferometer.get_detector_response
+            time_shift = self.ifo.time_delay_from_geocenter(0, 0, self.trigger_time)
+            dt_geocent = self.injection_args["geocent_time"] - self.start_time
+            dt = dt_geocent + time_shift
+            frequency_array = self.injection_waveform_generator.frequency_array
+            hoff[:] = hoff[:] * np.exp(-1j * 2 * np.pi * dt * frequency_array[:])
+
             hoft = bilby.core.utils.infft(hoff, self.sampling_rate)
             ax.plot(
                 self.tseries_gwpy.times,
@@ -623,9 +645,10 @@ class SampleScattering(object):
                 color="r",
                 label="Injected Signal",
             )
-        ax.set_xlabel("Time")
         ax.set_ylabel("Strain")
         ax.legend()
+        ax.set_epoch(self.start_time)
+        fig.refresh()
         fig.savefig(
             os.path.join(
                 self.outdir,
@@ -648,14 +671,15 @@ class SampleScattering(object):
         """
         self.q_value = ast.literal_eval(self.q_value)
         qspecgram = self.tseries_gwpy.q_transform(qrange=[self.q_value, self.q_value])
-        fig = qspecgram.plot(figsize=[8, 6])
+        fig = qspecgram.plot(figsize=[16, 8])
         ax = fig.gca()
-        # ax.set_epoch(0)
+        ax.set_epoch(self.start_time)
         ax.set_yscale("log")
-        ax.set_xlabel("Time [seconds]")
         ax.set_ylim(self.minimum_frequency, self.sampling_rate / 2)
         ax.grid(True, axis="y", which="both")
-        fig.add_colorbar(cmap="viridis", label="Normalized energy", vmin=0, vmax=50)
+        fig.refresh()
+
+        fig.colorbar(cmap="viridis", label="Normalized energy", vmin=0, vmax=50)
         fig.savefig(
             os.path.join(
                 self.outdir,
@@ -713,6 +737,7 @@ class SampleScattering(object):
             label=self.label,
             resume=True,
             injection_parameters=self.injection_args,
+            npool=self.npool,
             **self.sampler_kwargs,
         )
         return self.result
@@ -726,7 +751,7 @@ class SampleScattering(object):
 
 _model_map = dict(
     slow_scattering=slow_scattering,
-    # fast_scattering = bilby.gw.scattering.fast_scattering_wrapper,
+    # fast_scattering=fast_scattering,
 )
 
 
@@ -813,10 +838,11 @@ def setup_job():
     Scattering.plot_tseries_data()
     Scattering.plot_qscan_data()
 
-    # Launch the condor job
-    os.system(
-        f"condor_submit_dag {os.path.join(arguments.outdir, 'dag_scattering_PE.dag')}"
-    )
+    if not arguments.no_launch_automatically:
+        # Launch the condor job
+        os.system(
+            f"condor_submit_dag {os.path.join(arguments.outdir, 'dag_scattering_PE.dag')}"
+        )
 
 
 def perform_inference():
